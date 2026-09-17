@@ -32,11 +32,12 @@ public class BatchService {
     private final ThreadPoolExecutor ingestionExecutor;
     private final InferenceClient inferenceClient;
     private final EngineMetrics metrics;
+    private final WebhookNotifier webhookNotifier;
 
     public BatchService(ObjectMapper objectMapper, BatchProperties properties, JobStore jobStore,
                         @Qualifier("workerExecutor") ThreadPoolExecutor workerExecutor,
                         @Qualifier("ingestionExecutor") ThreadPoolExecutor ingestionExecutor,
-                        InferenceClient inferenceClient, EngineMetrics metrics) {
+                        InferenceClient inferenceClient, EngineMetrics metrics, WebhookNotifier webhookNotifier) {
         this.objectMapper = objectMapper;
         this.properties = properties;
         this.jobStore = jobStore;
@@ -44,6 +45,7 @@ public class BatchService {
         this.ingestionExecutor = ingestionExecutor;
         this.inferenceClient = inferenceClient;
         this.metrics = metrics;
+        this.webhookNotifier = webhookNotifier;
     }
 
     public Job submit(MultipartFile file, String routeName) throws IOException {
@@ -109,15 +111,18 @@ public class BatchService {
         } catch (OutOfMemoryError error) {
             metrics.recordOutOfMemory();
             job.fail();
+            persist(job);
             signalEnd(job.promptQueue());
         } catch (Exception exception) {
             job.fail();
+            persist(job);
             signalEnd(job.promptQueue());
         }
     }
 
     private void consume(Job job) {
         if (job.status() != com.doproject.model.JobStatus.FAILED) job.start();
+        persist(job);
         try {
             BlockingQueue<PromptChunk> queue = job.promptQueue();
             while (true) {
@@ -126,12 +131,18 @@ public class BatchService {
                 processChunk(job, chunk.prompts(), chunk.startIndex());
             }
             if (job.status() != com.doproject.model.JobStatus.FAILED) job.finish();
+            persist(job);
+            webhookNotifier.notifyAsync(job);
         } catch (OutOfMemoryError error) {
             metrics.recordOutOfMemory();
             job.fail();
+            persist(job);
+            webhookNotifier.notifyAsync(job);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             job.fail();
+            persist(job);
+            webhookNotifier.notifyAsync(job);
         }
     }
 
@@ -152,6 +163,15 @@ public class BatchService {
             } catch (Exception exception) {
                 job.record(PromptResult.failure(startIndex + offset, prompt, exception));
             }
+            persist(job);
+        }
+    }
+
+    private void persist(Job job) {
+        try {
+            jobStore.save(job);
+        } catch (RuntimeException exception) {
+            job.fail();
         }
     }
 

@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -122,4 +123,19 @@ class BatchApiIntegrationTest {
                                                                 .param("file", "../outside.json"))
                                 .andExpect(status().isBadRequest());
         }
+
+                    @Test
+                    void registersWebhookForExistingJob() throws Exception {
+                        MockMultipartFile file = new MockMultipartFile("file", "prompts.json", MediaType.APPLICATION_JSON_VALUE,
+                                "[\"webhook\"]".getBytes());
+                        MvcResult submission = mockMvc.perform(multipart("/job").file(file).param("route", "cheap"))
+                                .andExpect(status().isAccepted()).andReturn();
+                        String jobId = objectMapper.readValue(submission.getResponse().getContentAsString(), Map.class).get("jobId").toString();
+
+                        mockMvc.perform(post("/job/{id}/webhook", jobId)
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content("{\"callbackUrl\":\"http://localhost/callback\"}"))
+                                .andExpect(status().isOk())
+                                .andExpect(jsonPath("$.callbackUrl").value("http://localhost/callback"));
+                    }
 }

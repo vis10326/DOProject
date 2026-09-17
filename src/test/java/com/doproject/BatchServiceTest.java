@@ -1,6 +1,7 @@
 package com.doproject;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 import com.doproject.client.InferenceClient;
 import com.doproject.model.Job;
@@ -8,7 +9,9 @@ import com.doproject.model.JobStatus;
 import com.doproject.model.PromptResult;
 import com.doproject.metrics.EngineMetrics;
 import com.doproject.repository.JobStore;
+import com.doproject.repository.JobPersistence;
 import com.doproject.service.BatchService;
+import com.doproject.service.WebhookNotifier;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -25,6 +28,8 @@ class BatchServiceTest {
             1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(2));
         private final SimpleMeterRegistry metricsRegistry = new SimpleMeterRegistry();
         private final EngineMetrics metrics = new EngineMetrics(metricsRegistry);
+        private final JobStore jobStore = new JobStore(mock(JobPersistence.class));
+        private final WebhookNotifier webhookNotifier = mock(WebhookNotifier.class);
 
     @AfterEach
     void shutdown() {
@@ -40,7 +45,7 @@ class BatchServiceTest {
         };
         BatchService service = new BatchService(
                 new ObjectMapper(), new BatchProperties(10, 2, 1, 1, 2, 10, 2, "cheap", "workspace-input"),
-                new JobStore(), workerExecutor, ingestionExecutor, client, metrics);
+                jobStore, workerExecutor, ingestionExecutor, client, metrics, webhookNotifier);
 
         Job job = service.submit(new MockMultipartFile("file", "batch.json", "application/json",
             "[\"one\",\"bad\",\"three\"]".getBytes()), "cheap");
@@ -59,7 +64,7 @@ class BatchServiceTest {
         InferenceClient client = prompt -> { throw new OutOfMemoryError("simulated"); };
         BatchService service = new BatchService(
                 new ObjectMapper(), new BatchProperties(10, 2, 1, 1, 2, 10, 2, "cheap", "workspace-input"),
-                new JobStore(), workerExecutor, ingestionExecutor, client, metrics);
+                jobStore, workerExecutor, ingestionExecutor, client, metrics, webhookNotifier);
 
         Job job = service.submit(new MockMultipartFile("file", "batch.json", "application/json",
             "[\"one\"]".getBytes()), "cheap");
@@ -79,7 +84,7 @@ class BatchServiceTest {
         };
         BatchService service = new BatchService(
                 new ObjectMapper(), new BatchProperties(10, 2, 1, 1, 2, 10, 2, "cheap", "workspace-input"),
-                new JobStore(), workerExecutor, ingestionExecutor, client, metrics);
+                jobStore, workerExecutor, ingestionExecutor, client, metrics, webhookNotifier);
 
         Job job = service.submit(new MockMultipartFile("file", "batch.json", "application/json",
                 "[\"one\",\"two\"]".getBytes()), null);

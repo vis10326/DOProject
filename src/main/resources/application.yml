@@ -10,6 +10,18 @@ spring:
     multipart:
       max-file-size: 5MB
       max-request-size: 5MB
+persistence:
+  type: file
+  directory: ./job-data
+  bucket: ""
+  endpoint: ""
+  region: ""
+  access-key: ""
+  secret-key: ""
+webhook:
+  timeout: 5s
+  max-registrations: 1000
+  delivery-threads: 2
 batch:
   max-prompts: 10000
   chunk-size: 25

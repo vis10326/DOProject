@@ -4,9 +4,12 @@ import com.doproject.model.Job;
 import com.doproject.model.JobStatus;
 import com.doproject.model.JobStatusResponse;
 import com.doproject.model.PromptResult;
+import com.doproject.model.WebhookRequest;
 import com.doproject.repository.JobStore;
+import com.doproject.repository.WebhookStore;
 import com.doproject.service.BatchService;
 import java.io.IOException;
+import java.net.URI;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
@@ -16,6 +19,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
@@ -25,10 +29,12 @@ import org.springframework.web.multipart.MultipartFile;
 public class BatchController {
     private final BatchService service;
     private final JobStore store;
+    private final WebhookStore webhookStore;
 
-    public BatchController(BatchService service, JobStore store) {
+    public BatchController(BatchService service, JobStore store, WebhookStore webhookStore) {
         this.service = service;
         this.store = store;
+        this.webhookStore = webhookStore;
     }
 
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -60,6 +66,16 @@ public class BatchController {
             return ResponseEntity.status(HttpStatus.CONFLICT).build();
         }
         return ResponseEntity.ok(job.orderedResults());
+    }
+
+    @PostMapping("/{id}/webhook")
+    public WebhookRequest registerWebhook(@PathVariable String id, @RequestBody WebhookRequest request) {
+        store.find(id).orElseThrow(JobNotFoundException::new);
+        if (request.callbackUrl() == null || request.callbackUrl().isBlank()) {
+            throw new WebhookStore.InvalidWebhookException();
+        }
+        webhookStore.register(id, URI.create(request.callbackUrl()));
+        return request;
     }
 
     public static class JobNotFoundException extends RuntimeException { }

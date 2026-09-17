@@ -11,7 +11,8 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
 @Configuration
-@EnableConfigurationProperties({BatchProperties.class, InferenceProperties.class})
+@EnableConfigurationProperties({BatchProperties.class, InferenceProperties.class, PersistenceProperties.class,
+    WebhookProperties.class})
 public class EngineConfiguration {
     @Bean(destroyMethod = "shutdown")
     ThreadPoolExecutor workerExecutor(BatchProperties properties) {
@@ -27,6 +28,14 @@ public class EngineConfiguration {
                 properties.ingestionThreads(), properties.ingestionThreads(), 0L, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(properties.queueCapacity()),
                 new ThreadPoolExecutor.AbortPolicy());
+    }
+
+    @Bean(destroyMethod = "shutdown")
+    ThreadPoolExecutor webhookDeliveryExecutor(WebhookProperties properties) {
+        return new ThreadPoolExecutor(
+                properties.deliveryThreads(), properties.deliveryThreads(), 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(properties.maxRegistrations()),
+                new ThreadPoolExecutor.DiscardPolicy());
     }
 
     @Bean

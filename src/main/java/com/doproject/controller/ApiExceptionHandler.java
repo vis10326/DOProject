@@ -1,6 +1,7 @@
 package com.doproject.controller;
 
 import com.doproject.repository.JobStore;
+import com.doproject.repository.WebhookStore;
 import com.doproject.service.BatchService;
 import java.io.IOException;
 import java.util.Map;
@@ -29,6 +30,12 @@ public class ApiExceptionHandler {
     @ExceptionHandler(JobStore.TooManyJobsException.class)
     ResponseEntity<Map<String, String>> tooManyJobs() {
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(Map.of("error", "Job capacity reached"));
+    }
+
+    @ExceptionHandler({WebhookStore.InvalidWebhookException.class, WebhookStore.CapacityExceededException.class,
+            IllegalArgumentException.class})
+    ResponseEntity<Map<String, String>> invalidWebhook() {
+        return ResponseEntity.badRequest().body(Map.of("error", "Invalid or unavailable webhook registration"));
     }
 
     @ExceptionHandler(BatchController.JobNotFoundException.class)

@@ -1,5 +1,6 @@
 target/
 workspace-input/
+job-data/
 .idea/
 *.iml
 .DS_Store

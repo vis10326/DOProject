@@ -55,6 +55,21 @@ public final class Job {
     public int failed() { return failed.get(); }
     public BlockingQueue<PromptChunk> promptQueue() { return promptQueue; }
 
+    public JobSnapshot snapshot() {
+        return new JobSnapshot(id, routeName, total, completed(), succeeded(), failed(), status,
+                createdAt, orderedResults());
+    }
+
+    public static Job restore(JobSnapshot snapshot, int queueCapacity) {
+        Job job = new Job(snapshot.id(), snapshot.total(), queueCapacity, snapshot.routeName());
+        job.status = snapshot.status();
+        job.results.addAll(snapshot.results());
+        job.completed.set(snapshot.completed());
+        job.succeeded.set(snapshot.succeeded());
+        job.failed.set(snapshot.failed());
+        return job;
+    }
+
     public List<PromptResult> orderedResults() {
         List<PromptResult> copy = new ArrayList<>(results);
         copy.sort(Comparator.comparingInt(PromptResult::index));

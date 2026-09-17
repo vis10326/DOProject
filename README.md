@@ -121,6 +121,18 @@ The selected route is recorded in `batch.inference.route.requests`, and its esti
 
 Jobs also apply an internal streaming workload decision. An explicit `route` request parameter always wins. If no route is supplied, prompts start on `inference.default-route`; once the streamed prompt count reaches `batch.high-throughput-prompt-threshold`, the job switches to `batch.high-throughput-route` (configured as `cheap` by default). This avoids buffering the file just to classify its size.
 
+## Persistence And Webhooks
+
+Job snapshots and completed results are persisted to `./job-data` by default. For DigitalOcean Spaces, set `persistence.type=spaces` and configure the Spaces S3 endpoint, bucket, region, access key, and secret key. Register a callback after submission:
+
+```bash
+curl -X POST http://localhost:8080/job/{jobId}/webhook \
+    -H 'Content-Type: application/json' \
+    -d '{"callbackUrl":"https://example.com/batch-callback"}'
+```
+
+The callback receives the job ID, terminal status, and result counters. Delivery uses a separate bounded pool and never blocks inference processing; failed deliveries are isolated.
+
 Run unit and integration tests with:
 
 ```bash
