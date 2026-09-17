@@ -26,6 +26,13 @@ public class WebhookStore {
         if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
             throw new InvalidWebhookException();
         }
+        if (callbackUrl.getUserInfo() != null) {
+            throw new InvalidWebhookException();
+        }
+        String host = callbackUrl.getHost();
+        if (host == null || properties.allowedHosts().stream().noneMatch(host::equalsIgnoreCase)) {
+            throw new InvalidWebhookException();
+        }
         WebhookRegistration registration = new WebhookRegistration(jobId, callbackUrl, Instant.now());
         registrations.put(jobId, registration);
         return registration;

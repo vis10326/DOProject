@@ -12,14 +12,22 @@ import org.springframework.web.client.RestClient;
 
 @Configuration
 @EnableConfigurationProperties({BatchProperties.class, InferenceProperties.class, PersistenceProperties.class,
-    WebhookProperties.class})
+    WebhookProperties.class, AppProperties.class})
 public class EngineConfiguration {
     @Bean(destroyMethod = "shutdown")
     ThreadPoolExecutor workerExecutor(BatchProperties properties) {
         return new ThreadPoolExecutor(
                 properties.workerThreads(), properties.workerThreads(), 0L, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(properties.queueCapacity()),
-                new ThreadPoolExecutor.AbortPolicy());
+                (runnable, executor) -> {
+                    if (executor.isShutdown()) throw new java.util.concurrent.RejectedExecutionException("Worker pool is shutdown");
+                    try {
+                        executor.getQueue().put(runnable);
+                    } catch (InterruptedException exception) {
+                        Thread.currentThread().interrupt();
+                        throw new java.util.concurrent.RejectedExecutionException(exception);
+                    }
+                });
     }
 
     @Bean(destroyMethod = "shutdown")

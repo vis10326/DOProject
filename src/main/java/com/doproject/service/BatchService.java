@@ -1,8 +1,10 @@
 package com.doproject.service;
 
 import com.doproject.BatchProperties;
+import com.doproject.InferenceProperties;
 import com.doproject.client.InferenceClient;
 import com.doproject.model.Job;
+import com.doproject.model.JobStatus;
 import com.doproject.model.PromptChunk;
 import com.doproject.model.PromptResult;
 import com.doproject.metrics.EngineMetrics;
@@ -16,17 +18,21 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 @Service
 public class BatchService {
+    private static final Logger log = LoggerFactory.getLogger(BatchService.class);
     private final ObjectMapper objectMapper;
     private final BatchProperties properties;
+    private final InferenceProperties inferenceProperties;
     private final JobStore jobStore;
     private final ThreadPoolExecutor workerExecutor;
     private final ThreadPoolExecutor ingestionExecutor;
@@ -34,12 +40,13 @@ public class BatchService {
     private final EngineMetrics metrics;
     private final WebhookNotifier webhookNotifier;
 
-    public BatchService(ObjectMapper objectMapper, BatchProperties properties, JobStore jobStore,
-                        @Qualifier("workerExecutor") ThreadPoolExecutor workerExecutor,
+    public BatchService(ObjectMapper objectMapper, BatchProperties properties, InferenceProperties inferenceProperties,
+                        JobStore jobStore, @Qualifier("workerExecutor") ThreadPoolExecutor workerExecutor,
                         @Qualifier("ingestionExecutor") ThreadPoolExecutor ingestionExecutor,
                         InferenceClient inferenceClient, EngineMetrics metrics, WebhookNotifier webhookNotifier) {
         this.objectMapper = objectMapper;
         this.properties = properties;
+        this.inferenceProperties = inferenceProperties;
         this.jobStore = jobStore;
         this.workerExecutor = workerExecutor;
         this.ingestionExecutor = ingestionExecutor;
@@ -62,14 +69,15 @@ public class BatchService {
     }
 
     private Job submit(InputStreamSupplier inputSupplier, String routeName) {
-        String selectedRoute = routeName == null || routeName.isBlank() ? null : routeName;
-        Job job = jobStore.create(0, properties.maxJobs(), properties.queueCapacity(), selectedRoute);
+        String selectedRoute = routeName == null || routeName.isBlank()
+                ? inferenceProperties.defaultRoute() : routeName;
+        Job job = jobStore.create(0, properties.maxJobs(), selectedRoute);
         try {
-            workerExecutor.execute(() -> consume(job));
             ingestionExecutor.execute(() -> ingest(job, inputSupplier));
         } catch (RejectedExecutionException exception) {
+            log.warn("Ingestion pool full, rejecting job {}", job.id());
             job.fail();
-            signalEnd(job.promptQueue());
+            persist(job);
             jobStore.remove(job.id());
             throw new QueueFullException();
         }
@@ -77,6 +85,9 @@ public class BatchService {
     }
 
     private void ingest(Job job, InputStreamSupplier inputSupplier) {
+        job.start();
+        persist(job);
+        Semaphore inFlight = new Semaphore(properties.maxInFlightPerJob());
         try (InputStream input = inputSupplier.open(); JsonParser parser = objectMapper.getFactory().createParser(input)) {
             if (parser.nextToken() != JsonToken.START_ARRAY) {
                 throw new InvalidBatchException("Prompt file must contain a JSON array");
@@ -95,63 +106,72 @@ public class BatchService {
                 chunk.add(prompt);
                 job.setTotal(index + 1);
                 index++;
-                if (job.routeName() == null && index >= properties.highThroughputPromptThreshold()) {
-                    job.setRouteName(properties.highThroughputRoute());
-                }
                 if (chunk.size() == properties.chunkSize()) {
-                    job.promptQueue().put(PromptChunk.data(chunk, index - chunk.size()));
+                    submitChunk(job, PromptChunk.data(chunk, index - chunk.size()), inFlight);
                     chunk.clear();
                 }
             }
             if (chunk.isEmpty() && index == 0) {
                 throw new InvalidBatchException("Prompt array must not be empty");
             }
-            if (!chunk.isEmpty()) job.promptQueue().put(PromptChunk.data(chunk, index - chunk.size()));
-            job.promptQueue().put(PromptChunk.end());
+            if (!chunk.isEmpty()) submitChunk(job, PromptChunk.data(chunk, index - chunk.size()), inFlight);
         } catch (OutOfMemoryError error) {
             metrics.recordOutOfMemory();
+            log.error("Job {} exhausted memory during ingestion", job.id(), error);
             job.fail();
             persist(job);
-            signalEnd(job.promptQueue());
+        } catch (InvalidBatchException exception) {
+            log.warn("Invalid batch for job {}: {}", job.id(), exception.getMessage());
+            job.fail();
+            persist(job);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            log.warn("Ingestion interrupted for job {}", job.id());
+            job.fail();
+            persist(job);
         } catch (Exception exception) {
+            log.error("Ingestion failed for job {}", job.id(), exception);
             job.fail();
             persist(job);
-            signalEnd(job.promptQueue());
+        } finally {
+            if (job.decrementPending() == 0) complete(job);
         }
     }
 
-    private void consume(Job job) {
-        if (job.status() != com.doproject.model.JobStatus.FAILED) job.start();
-        persist(job);
+    private void submitChunk(Job job, PromptChunk chunk, Semaphore inFlight) throws InterruptedException {
+        inFlight.acquire();
+        job.incrementPending();
         try {
-            BlockingQueue<PromptChunk> queue = job.promptQueue();
-            while (true) {
-                PromptChunk chunk = queue.take();
-                if (chunk.terminal()) break;
-                processChunk(job, chunk.prompts(), chunk.startIndex());
-            }
-            if (job.status() != com.doproject.model.JobStatus.FAILED) job.finish();
-            persist(job);
-            webhookNotifier.notifyAsync(job);
-        } catch (OutOfMemoryError error) {
-            metrics.recordOutOfMemory();
-            job.fail();
-            persist(job);
-            webhookNotifier.notifyAsync(job);
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            job.fail();
-            persist(job);
-            webhookNotifier.notifyAsync(job);
+            workerExecutor.execute(() -> {
+                try {
+                    if (job.status() != JobStatus.FAILED) {
+                        processChunk(job, chunk.prompts(), chunk.startIndex());
+                    }
+                } catch (OutOfMemoryError error) {
+                    metrics.recordOutOfMemory();
+                    log.error("Job {} exhausted memory while processing a chunk", job.id(), error);
+                    job.fail();
+                } catch (RuntimeException exception) {
+                    log.error("Job {} chunk processing failed", job.id(), exception);
+                    job.fail();
+                } finally {
+                    persist(job);
+                    inFlight.release();
+                    if (job.decrementPending() == 0) complete(job);
+                }
+            });
+        } catch (RuntimeException exception) {
+            inFlight.release();
+            job.decrementPending();
+            throw exception;
         }
     }
 
-    private void signalEnd(BlockingQueue<PromptChunk> queue) {
-        try {
-            queue.put(PromptChunk.end());
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-        }
+    private void complete(Job job) {
+        if (job.status() != JobStatus.FAILED) job.finish();
+        boolean saved = persist(job);
+        webhookNotifier.notifyAsync(job);
+        if (saved) jobStore.remove(job.id());
     }
 
     private void processChunk(Job job, List<String> prompts, int startIndex) {
@@ -161,17 +181,20 @@ public class BatchService {
                 job.record(PromptResult.success(startIndex + offset, prompt,
                     inferenceClient.evaluate(prompt, job.routeName())));
             } catch (Exception exception) {
+                log.warn("Prompt {} failed for job {}: {}", startIndex + offset, job.id(), exception.getMessage());
                 job.record(PromptResult.failure(startIndex + offset, prompt, exception));
             }
-            persist(job);
         }
     }
 
-    private void persist(Job job) {
+    private boolean persist(Job job) {
         try {
             jobStore.save(job);
+            return true;
         } catch (RuntimeException exception) {
+            log.error("Failed to persist job {}", job.id(), exception);
             job.fail();
+            return false;
         }
     }
 

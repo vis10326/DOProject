@@ -5,6 +5,8 @@ import com.doproject.model.Job;
 import com.doproject.repository.WebhookStore;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
@@ -12,6 +14,7 @@ import org.springframework.web.client.RestClient;
 
 @Service
 public class WebhookNotifier {
+    private static final Logger log = LoggerFactory.getLogger(WebhookNotifier.class);
     private final WebhookStore store;
     private final RestClient client;
     private final Executor deliveryExecutor;
@@ -35,8 +38,8 @@ public class WebhookNotifier {
                                 "total", job.total(), "completed", job.completed(),
                                 "succeeded", job.succeeded(), "failed", job.failed()))
                         .retrieve().toBodilessEntity();
-            } catch (RuntimeException ignored) {
-                // Webhook delivery must not affect batch execution.
+            } catch (RuntimeException exception) {
+                log.warn("Webhook delivery failed for job {} to {}", job.id(), registration.callbackUrl(), exception);
             }
         }));
     }

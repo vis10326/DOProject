@@ -22,12 +22,16 @@ webhook:
   timeout: 5s
   max-registrations: 1000
   delivery-threads: 2
+  allowed-hosts: []
+app:
+  api-key: ${APP_API_KEY:dev-key}
 batch:
   max-prompts: 10000
   chunk-size: 25
   worker-threads: 4
   ingestion-threads: 2
   queue-capacity: 32
+  max-in-flight-per-job: 4
   max-jobs: 1000
   high-throughput-prompt-threshold: 1000
   high-throughput-route: cheap
@@ -38,7 +42,7 @@ inference:
   max-retries: 3
   initial-backoff: 100ms
   max-backoff: 2s
-  default-route: premium
+  default-route: cheap
   routes:
     - name: cheap
       endpoint: ""
