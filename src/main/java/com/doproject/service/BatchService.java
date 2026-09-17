@@ -93,6 +93,9 @@ public class BatchService {
                 chunk.add(prompt);
                 job.setTotal(index + 1);
                 index++;
+                if (job.routeName() == null && index >= properties.highThroughputPromptThreshold()) {
+                    job.setRouteName(properties.highThroughputRoute());
+                }
                 if (chunk.size() == properties.chunkSize()) {
                     job.promptQueue().put(PromptChunk.data(chunk, index - chunk.size()));
                     chunk.clear();

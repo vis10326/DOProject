@@ -17,6 +17,8 @@ batch:
   ingestion-threads: 2
   queue-capacity: 32
   max-jobs: 1000
+  high-throughput-prompt-threshold: 1000
+  high-throughput-route: cheap
   input-directory: ./workspace-input
 inference:
   endpoint: ""
@@ -24,7 +26,7 @@ inference:
   max-retries: 3
   initial-backoff: 100ms
   max-backoff: 2s
-  default-route: cheap
+  default-route: premium
   routes:
     - name: cheap
       endpoint: ""

@@ -39,7 +39,7 @@ class BatchServiceTest {
             return "answer:" + prompt;
         };
         BatchService service = new BatchService(
-                new ObjectMapper(), new BatchProperties(10, 2, 1, 1, 2, 10, "workspace-input"),
+                new ObjectMapper(), new BatchProperties(10, 2, 1, 1, 2, 10, 2, "cheap", "workspace-input"),
                 new JobStore(), workerExecutor, ingestionExecutor, client, metrics);
 
         Job job = service.submit(new MockMultipartFile("file", "batch.json", "application/json",
@@ -58,7 +58,7 @@ class BatchServiceTest {
     void recordsOutOfMemoryErrorAndFailsTheJob() throws Exception {
         InferenceClient client = prompt -> { throw new OutOfMemoryError("simulated"); };
         BatchService service = new BatchService(
-                new ObjectMapper(), new BatchProperties(10, 2, 1, 1, 2, 10, "workspace-input"),
+                new ObjectMapper(), new BatchProperties(10, 2, 1, 1, 2, 10, 2, "cheap", "workspace-input"),
                 new JobStore(), workerExecutor, ingestionExecutor, client, metrics);
 
         Job job = service.submit(new MockMultipartFile("file", "batch.json", "application/json",
@@ -67,6 +67,25 @@ class BatchServiceTest {
 
         assertThat(job.status()).isEqualTo(JobStatus.FAILED);
         assertThat(metricsRegistry.get("batch.oom.errors").counter().count()).isEqualTo(1);
+    }
+
+    @Test
+    void selectsCheapRouteWhenStreamReachesHighThroughputThreshold() throws Exception {
+        InferenceClient client = new InferenceClient() {
+            @Override
+            public String evaluate(String prompt) {
+                return prompt;
+            }
+        };
+        BatchService service = new BatchService(
+                new ObjectMapper(), new BatchProperties(10, 2, 1, 1, 2, 10, 2, "cheap", "workspace-input"),
+                new JobStore(), workerExecutor, ingestionExecutor, client, metrics);
+
+        Job job = service.submit(new MockMultipartFile("file", "batch.json", "application/json",
+                "[\"one\",\"two\"]".getBytes()), null);
+        waitForCompletion(job);
+
+        assertThat(job.routeName()).isEqualTo("cheap");
     }
 
     private void waitForCompletion(Job job) throws InterruptedException {

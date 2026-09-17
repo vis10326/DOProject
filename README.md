@@ -119,6 +119,8 @@ inference:
 
 The selected route is recorded in `batch.inference.route.requests`, and its estimated request cost is added to `batch.inference.estimated.cost`. This gives high-volume tests a low-cost default while retaining an explicit premium route for future workload classification. The current router selects `inference.default-route`; automatic risk-based escalation is not enabled.
 
+Jobs also apply an internal streaming workload decision. An explicit `route` request parameter always wins. If no route is supplied, prompts start on `inference.default-route`; once the streamed prompt count reaches `batch.high-throughput-prompt-threshold`, the job switches to `batch.high-throughput-route` (configured as `cheap` by default). This avoids buffering the file just to classify its size.
+
 Run unit and integration tests with:
 
 ```bash

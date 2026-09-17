@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public final class Job {
     private final String id;
-    private final String routeName;
+    private volatile String routeName;
     private volatile int total;
     private final Instant createdAt = Instant.now();
     private final AtomicInteger completed = new AtomicInteger();
@@ -46,6 +46,7 @@ public final class Job {
 
     public String id() { return id; }
     public String routeName() { return routeName; }
+    public void setRouteName(String routeName) { this.routeName = routeName; }
     public int total() { return total; }
     public Instant createdAt() { return createdAt; }
     public JobStatus status() { return status; }
