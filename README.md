@@ -29,113 +29,98 @@ Iterations on top if time is there:
 flowchart LR
     A[Prompt Batch File] --> B[Ingest API]
     B --> C[Job ID Returned Immediately]
-    C --> D[Orchestrator]
-    D --> E[Chunking / Partitioning]
-    E --> F[Admission Queue]
-    F --> G[Worker Pool Manager / Autoscaler]
-    G --> H[Bounded Worker Pool]
-    H --> I[Inference Call]
-    I --> J[Live Inference Endpoint]
-
-    J --> K[Response Metrics]
-    K --> L[Metrics Collector]
-    L --> M[Backpressure Controller]
-    L --> G
-    M --> N[Throttle / Reduce Concurrency / Reject]
-    N --> F
-
-    H --> O[Result Queue]
-    O --> P[Result Aggregator Pool]
-    P --> Q[Job State Store]
-    Q --> R[GET /job/{id}/status]
-    P --> S[Final Report / Download]
-    S --> T[GET /job/{id}/download]
-
-    P --> U[Partial Failure Isolation]
-    P --> V[Success Compilation]
-
-    W[Resource Guard / Max Concurrency] --> G
-    W --> M
-
-    X[Unit Tests + Integration Tests] --> Y[Git Deployment]
+    C --> D[Streaming Ingest]
+    D --> E[Chunking]
+    E --> F[Per-job in-flight cap]
+    F --> G[Bounded worker queue]
+    G --> H[Worker pool]
+    H --> I[Inference call]
+    I --> J[Live inference endpoint]
+    H --> K[Job snapshot]
+    K --> L[GET /job/id/status]
+    K --> M[GET /job/id/download]
+    H --> N[Partial failure isolation]
+    N --> O[Compiled results]
+    P[API key + webhook allowlist] --> B
 ```
 
-## Architecture Notes
+## How it works
 
-### Backpressure ownership
-The Backpressure Controller is the component that decides when the system should slow or reject work. It receives feedback from the Metrics Collector, which aggregates worker latency, timeout rate, queue depth, and resource-pressure signals from the downstream inference endpoints.
+Submit returns a job ID immediately. One ingest thread streams the JSON array with Jackson, never materializing the full file. Each filled chunk is submitted to the shared worker pool so prompts from the same job run concurrently.
 
-### When backpressure is applied
-Backpressure is triggered before the worker pool or queue exceeds safe limits. Typical triggers include queue depth above threshold, in-flight concurrency at the configured cap, increasing downstream latency, elevated 429/5xx error rates, or memory/CPU pressure.
+Backpressure is two layers:
 
-### How downstream pressure is detected
-Workers emit per-request runtime signals such as latency, timeout, retry count, and HTTP status codes. The Metrics Collector aggregates these signals and provides them to the Backpressure Controller and the Worker Pool Manager so they can adapt concurrency and queue admission.
+- **Per job:** ingest waits once that job already has `batch.max-in-flight-per-job` chunks in the pool (default 4). That stops one large job from filling the workers.
+- **Global:** the worker pool is `batch.worker-threads` threads (default 4) plus a queue of `batch.queue-capacity` (default 32). When the queue is full, ingest blocks until a worker takes a chunk. A full ingestion pool rejects new jobs with `503`.
 
-### Memory exhaustion during chunking
-If memory exhaustion is detected during the chunking stage, the Orchestrator should stop accepting or buffering additional chunks and apply backpressure before the heap grows past safe limits. The system must stream or chunk input in bounded sizes and enforce max prompt count, max buffered bytes, and max queue depth.
+Prompt failures are isolated. Successful prompts stay in the compiled report. `GET /job/{id}/status` works while the job runs; `GET /job/{id}/download` returns the ordered result array after `COMPLETED` or `COMPLETED_WITH_ERRORS`.
 
-### Worker pool sizing and scaling
-The worker pool limit should be derived from endpoint throughput, memory headroom, latency targets, and cost caps. The Worker Pool Manager adjusts concurrency dynamically using min/max bounds and scaling signals from queue depth, error rate, and resource metrics.
+OOM during ingest or chunk processing fails the job and increments `batch.oom.errors`. Caps also include `batch.max-prompts`, `batch.max-jobs` (in-flight jobs in memory), and multipart upload size.
 
-### Result aggregation
-The Result Aggregator Pool is separate from the worker pool and is responsible for consuming result events, isolating failed prompts, compiling successful results, and updating job status. This keeps the expensive inference workers focused on execution while the smaller aggregator pool manages final assembly.
-
-### Cost-efficiency for high-throughput testing
-Cost efficiency is achieved by preferring the cheapest viable inference configuration for high-volume prompts, routing low-risk workloads to lower-cost endpoints, and only escalating to premium models when necessary. The system should use bounded concurrency, adaptive scaling, retry caps, deduplication, batching, and cost-aware routing instead of blindly scaling workers for throughput. The key metric is successful throughput per dollar, not raw request rate alone.
+Interrupted `QUEUED` or `RUNNING` snapshots are marked `FAILED` on startup. Remaining prompts are not stored, so those jobs are not resumed.
 
 ## Running
 
-This repository contains a Spring Boot 3.4 service targeting Java 17. Run it with:
+Spring Boot 3.4, Java 17:
 
 ```bash
 mvn spring-boot:run
 ```
 
-Place a JSON array of prompts in the configured local workspace directory (`./workspace-input` by default). Submit the server-side file name; the API returns immediately with a job ID:
+Job APIs require `X-API-Key`. The default is `dev-key`; override with `APP_API_KEY`. `/actuator/health` is open.
+
+Place a JSON array of prompts in `./workspace-input` (configurable via `batch.input-directory`):
 
 ```bash
-curl -X POST --data-urlencode 'file=prompts.json' http://localhost:8080/job/local
-curl http://localhost:8080/job/{jobId}/status
-curl http://localhost:8080/job/{jobId}/download
+curl -H "X-API-Key: dev-key" -X POST --data-urlencode 'file=prompts.json' http://localhost:8080/job/local
+curl -H "X-API-Key: dev-key" http://localhost:8080/job/{jobId}/status
+curl -H "X-API-Key: dev-key" http://localhost:8080/job/{jobId}/download
 ```
 
-The multipart `POST /job` endpoint is also available when a client needs to upload a file. The default inference adapter echoes prompts for local development. Set `inference.endpoint` to a POST endpoint that accepts `{ "prompt": "..." }` to use live inference. Bounded worker, queue, prompt-count, upload-size, and retained-job limits are configured in `application.yml`.
+`POST /job` accepts a multipart upload. Optional `route` selects an inference route; if omitted the job uses `inference.default-route` (`cheap`) for its whole lifetime.
 
-Ingestion uses Jackson's token streaming API and never materializes the full prompt array. Each job owns a bounded prompt-chunk queue keyed by its job object: the ingestion pool blocks when that queue is full, and the worker pool consumes chunks independently. `batch.ingestion-threads` controls file readers; `batch.worker-threads` controls inference workers.
-
-For cost-efficient high-throughput testing, inference uses the configured `cheap` route by default. Routes can point to separate models or providers and declare an estimated request price:
+With empty route endpoints the client echoes the prompt for local development. Point `inference.routes[].endpoint` (or `inference.endpoint`) at a POST API that accepts `{ "prompt": "..." }` for live inference. Transient `429`/`5xx` responses retry with backoff.
 
 ```yaml
 inference:
-    default-route: cheap
-    routes:
-        - name: cheap
-            endpoint: https://low-cost-model.example/evaluate
-            cost-per-request: 0.001
-        - name: premium
-            endpoint: https://high-quality-model.example/evaluate
-            cost-per-request: 0.02
+  default-route: cheap
+  routes:
+    - name: cheap
+      endpoint: https://low-cost-model.example/evaluate
+      cost-per-request: 0.001
+    - name: premium
+      endpoint: https://high-quality-model.example/evaluate
+      cost-per-request: 0.02
 ```
 
-The selected route is recorded in `batch.inference.route.requests`, and its estimated request cost is added to `batch.inference.estimated.cost`. This gives high-volume tests a low-cost default while retaining an explicit premium route for future workload classification. The current router selects `inference.default-route`; automatic risk-based escalation is not enabled.
+`batch.inference.route.requests` and `batch.inference.estimated.cost` record the selected route and estimated spend. Automatic risk-based escalation is not enabled.
 
-Jobs also apply an internal streaming workload decision. An explicit `route` request parameter always wins. If no route is supplied, prompts start on `inference.default-route`; once the streamed prompt count reaches `batch.high-throughput-prompt-threshold`, the job switches to `batch.high-throughput-route` (configured as `cheap` by default). This avoids buffering the file just to classify its size.
+Relevant `application.yml` limits:
 
-## Persistence And Webhooks
+| Setting | Default | Role |
+|---|---|---|
+| `batch.worker-threads` | 4 | Inference workers |
+| `batch.ingestion-threads` | 2 | File readers |
+| `batch.queue-capacity` | 32 | Shared worker queue |
+| `batch.max-in-flight-per-job` | 4 | Chunks one job may have in the pool |
+| `batch.max-prompts` | 10000 | Prompts per file |
+| `batch.max-jobs` | 1000 | In-memory in-flight jobs |
+| `batch.chunk-size` | 25 | Prompts per chunk |
 
-Job snapshots and completed results are persisted to `./job-data` by default. For DigitalOcean Spaces, set `persistence.type=spaces` and configure the Spaces S3 endpoint, bucket, region, access key, and secret key. Register a callback after submission:
+## Persistence and webhooks
+
+Snapshots are written after each chunk and on terminal status, not after every prompt. Finished jobs are evicted from memory; status and download reload from disk. Default store is `./job-data`. For DigitalOcean Spaces set `persistence.type=spaces` and the bucket, endpoint, region, access key, and secret key.
+
+Register a callback after submit. The host must be in `webhook.allowed-hosts` (empty by default, so registrations fail closed until you allowlist hosts):
 
 ```bash
-curl -X POST http://localhost:8080/job/{jobId}/webhook \
+curl -H "X-API-Key: dev-key" -X POST http://localhost:8080/job/{jobId}/webhook \
     -H 'Content-Type: application/json' \
     -d '{"callbackUrl":"https://example.com/batch-callback"}'
 ```
 
-The callback receives the job ID, terminal status, and result counters. Delivery uses a separate bounded pool and never blocks inference processing; failed deliveries are isolated.
-
-Run unit and integration tests with:
+The callback receives job ID, terminal status, and result counters. Delivery uses a separate bounded pool and does not block inference; failures are logged and isolated.
 
 ```bash
 mvn test
 ```
-
