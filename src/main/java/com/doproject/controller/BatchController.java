@@ -32,15 +32,19 @@ public class BatchController {
     }
 
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<Map<String, String>> submit(@RequestParam("file") MultipartFile file) throws IOException {
+    public ResponseEntity<Map<String, String>> submit(@RequestParam("file") MultipartFile file,
+                                                       @RequestParam(value = "route", required = false) String routeName)
+            throws IOException {
         if (file.isEmpty()) throw new BatchService.InvalidBatchException("Batch file must not be empty");
-        Job job = service.submit(file);
+        Job job = service.submit(file, routeName);
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of("jobId", job.id(), "status", job.status().name()));
     }
 
     @PostMapping("/local")
-    public ResponseEntity<Map<String, String>> submitLocal(@RequestParam("file") String fileName) throws IOException {
-        Job job = service.submitLocal(fileName);
+    public ResponseEntity<Map<String, String>> submitLocal(@RequestParam("file") String fileName,
+                                                           @RequestParam(value = "route", required = false) String routeName)
+            throws IOException {
+        Job job = service.submitLocal(fileName, routeName);
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of("jobId", job.id(), "status", job.status().name()));
     }
 

@@ -101,6 +101,24 @@ curl http://localhost:8080/job/{jobId}/download
 
 The multipart `POST /job` endpoint is also available when a client needs to upload a file. The default inference adapter echoes prompts for local development. Set `inference.endpoint` to a POST endpoint that accepts `{ "prompt": "..." }` to use live inference. Bounded worker, queue, prompt-count, upload-size, and retained-job limits are configured in `application.yml`.
 
+Ingestion uses Jackson's token streaming API and never materializes the full prompt array. Each job owns a bounded prompt-chunk queue keyed by its job object: the ingestion pool blocks when that queue is full, and the worker pool consumes chunks independently. `batch.ingestion-threads` controls file readers; `batch.worker-threads` controls inference workers.
+
+For cost-efficient high-throughput testing, inference uses the configured `cheap` route by default. Routes can point to separate models or providers and declare an estimated request price:
+
+```yaml
+inference:
+    default-route: cheap
+    routes:
+        - name: cheap
+            endpoint: https://low-cost-model.example/evaluate
+            cost-per-request: 0.001
+        - name: premium
+            endpoint: https://high-quality-model.example/evaluate
+            cost-per-request: 0.02
+```
+
+The selected route is recorded in `batch.inference.route.requests`, and its estimated request cost is added to `batch.inference.estimated.cost`. This gives high-volume tests a low-cost default while retaining an explicit premium route for future workload classification. The current router selects `inference.default-route`; automatic risk-based escalation is not enabled.
+
 Run unit and integration tests with:
 
 ```bash

@@ -42,11 +42,11 @@ class BatchApiIntegrationTest {
 
     @Test
     void uploadsBatchAndReturnsCompiledResults() throws Exception {
-        when(inferenceClient.evaluate(anyString())).thenAnswer(invocation -> "output:" + invocation.getArgument(0));
+        when(inferenceClient.evaluate(anyString(), anyString())).thenAnswer(invocation -> "output:" + invocation.getArgument(0));
         MockMultipartFile file = new MockMultipartFile("file", "prompts.json", MediaType.APPLICATION_JSON_VALUE,
                 "[\"first\",\"second\"]".getBytes());
 
-        MvcResult submission = mockMvc.perform(multipart("/job").file(file))
+        MvcResult submission = mockMvc.perform(multipart("/job").file(file).param("route", "cheap"))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.jobId").isString())
                 .andReturn();
@@ -75,19 +75,31 @@ class BatchApiIntegrationTest {
         MockMultipartFile file = new MockMultipartFile("file", "prompts.json", MediaType.APPLICATION_JSON_VALUE,
                 "[\"\"]".getBytes());
 
-        mockMvc.perform(multipart("/job").file(file))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("Prompts must be non-blank strings"));
+        MvcResult submission = mockMvc.perform(multipart("/job").file(file))
+                .andExpect(status().isAccepted())
+                .andReturn();
+        String jobId = objectMapper.readValue(submission.getResponse().getContentAsString(), Map.class).get("jobId").toString();
+
+        for (int attempt = 0; attempt < 100; attempt++) {
+            MvcResult jobStatus = mockMvc.perform(get("/job/{id}/status", jobId)).andReturn();
+            if (jobStatus.getResponse().getContentAsString().contains("FAILED")) break;
+            Thread.sleep(10);
+        }
+
+        mockMvc.perform(get("/job/{id}/status", jobId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FAILED"));
     }
 
         @Test
         void readsBatchFromConfiguredLocalWorkspace() throws Exception {
-                when(inferenceClient.evaluate(anyString())).thenAnswer(invocation -> "output:" + invocation.getArgument(0));
+                when(inferenceClient.evaluate(anyString(), anyString())).thenAnswer(invocation -> "output:" + invocation.getArgument(0));
                 Files.writeString(workspace.resolve("local-prompts.json"), "[\"local\"]");
 
                 MvcResult submission = mockMvc.perform(
                                                 org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/job/local")
-                                                                .param("file", "local-prompts.json"))
+                                                                .param("file", "local-prompts.json")
+                                                                .param("route", "cheap"))
                                 .andExpect(status().isAccepted())
                                 .andReturn();
                 String jobId = objectMapper.readValue(submission.getResponse().getContentAsString(), Map.class).get("jobId").toString();

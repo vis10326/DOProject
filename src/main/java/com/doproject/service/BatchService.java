@@ -3,17 +3,23 @@ package com.doproject.service;
 import com.doproject.BatchProperties;
 import com.doproject.client.InferenceClient;
 import com.doproject.model.Job;
+import com.doproject.model.PromptChunk;
 import com.doproject.model.PromptResult;
+import com.doproject.metrics.EngineMetrics;
 import com.doproject.repository.JobStore;
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -22,74 +28,139 @@ public class BatchService {
     private final ObjectMapper objectMapper;
     private final BatchProperties properties;
     private final JobStore jobStore;
-    private final ThreadPoolExecutor executor;
+    private final ThreadPoolExecutor workerExecutor;
+    private final ThreadPoolExecutor ingestionExecutor;
     private final InferenceClient inferenceClient;
+    private final EngineMetrics metrics;
 
     public BatchService(ObjectMapper objectMapper, BatchProperties properties, JobStore jobStore,
-                        ThreadPoolExecutor executor, InferenceClient inferenceClient) {
+                        @Qualifier("workerExecutor") ThreadPoolExecutor workerExecutor,
+                        @Qualifier("ingestionExecutor") ThreadPoolExecutor ingestionExecutor,
+                        InferenceClient inferenceClient, EngineMetrics metrics) {
         this.objectMapper = objectMapper;
         this.properties = properties;
         this.jobStore = jobStore;
-        this.executor = executor;
+        this.workerExecutor = workerExecutor;
+        this.ingestionExecutor = ingestionExecutor;
         this.inferenceClient = inferenceClient;
+        this.metrics = metrics;
     }
 
-    public Job submit(MultipartFile file) throws IOException {
-        return submit(file.getInputStream());
+    public Job submit(MultipartFile file, String routeName) throws IOException {
+        return submit(file::getInputStream, routeName);
     }
 
-    public Job submitLocal(String fileName) throws IOException {
+    public Job submitLocal(String fileName, String routeName) throws IOException {
         Path inputDirectory = Path.of(properties.inputDirectory()).toAbsolutePath().normalize();
         Path inputFile = inputDirectory.resolve(fileName).normalize();
         if (!inputFile.startsWith(inputDirectory) || Files.isDirectory(inputFile)) {
             throw new InvalidBatchException("Input file must be inside the configured workspace directory");
         }
-        try (InputStream input = Files.newInputStream(inputFile)) {
-            return submit(input);
-        }
+        return submit(() -> Files.newInputStream(inputFile), routeName);
     }
 
-    private Job submit(InputStream input) throws IOException {
-        List<String> prompts = objectMapper.readValue(input, new TypeReference<>() {});
-        validate(prompts);
-        Job job = jobStore.create(prompts.size(), properties.maxJobs());
+    private Job submit(InputStreamSupplier inputSupplier, String routeName) {
+        String selectedRoute = routeName == null || routeName.isBlank() ? null : routeName;
+        Job job = jobStore.create(0, properties.maxJobs(), properties.queueCapacity(), selectedRoute);
         try {
-            executor.execute(() -> process(job, prompts));
+            workerExecutor.execute(() -> consume(job));
+            ingestionExecutor.execute(() -> ingest(job, inputSupplier));
         } catch (RejectedExecutionException exception) {
+            job.fail();
+            signalEnd(job.promptQueue());
             jobStore.remove(job.id());
             throw new QueueFullException();
         }
         return job;
     }
 
-    private void validate(List<String> prompts) {
-        if (prompts == null || prompts.isEmpty()) throw new InvalidBatchException("Prompt array must not be empty");
-        if (prompts.size() > properties.maxPrompts()) {
-            throw new InvalidBatchException("Prompt count exceeds configured limit");
+    private void ingest(Job job, InputStreamSupplier inputSupplier) {
+        try (InputStream input = inputSupplier.open(); JsonParser parser = objectMapper.getFactory().createParser(input)) {
+            if (parser.nextToken() != JsonToken.START_ARRAY) {
+                throw new InvalidBatchException("Prompt file must contain a JSON array");
+            }
+            List<String> chunk = new ArrayList<>(properties.chunkSize());
+            int index = 0;
+            while (parser.nextToken() != JsonToken.END_ARRAY) {
+                if (parser.currentToken() != JsonToken.VALUE_STRING) {
+                    throw new InvalidBatchException("Prompts must be strings");
+                }
+                String prompt = parser.getValueAsString();
+                validatePrompt(prompt);
+                if (index >= properties.maxPrompts()) {
+                    throw new InvalidBatchException("Prompt count exceeds configured limit");
+                }
+                chunk.add(prompt);
+                job.setTotal(index + 1);
+                index++;
+                if (chunk.size() == properties.chunkSize()) {
+                    job.promptQueue().put(PromptChunk.data(chunk, index - chunk.size()));
+                    chunk.clear();
+                }
+            }
+            if (chunk.isEmpty() && index == 0) {
+                throw new InvalidBatchException("Prompt array must not be empty");
+            }
+            if (!chunk.isEmpty()) job.promptQueue().put(PromptChunk.data(chunk, index - chunk.size()));
+            job.promptQueue().put(PromptChunk.end());
+        } catch (OutOfMemoryError error) {
+            metrics.recordOutOfMemory();
+            job.fail();
+            signalEnd(job.promptQueue());
+        } catch (Exception exception) {
+            job.fail();
+            signalEnd(job.promptQueue());
         }
-        if (prompts.stream().anyMatch(prompt -> prompt == null || prompt.isBlank())) {
+    }
+
+    private void consume(Job job) {
+        if (job.status() != com.doproject.model.JobStatus.FAILED) job.start();
+        try {
+            BlockingQueue<PromptChunk> queue = job.promptQueue();
+            while (true) {
+                PromptChunk chunk = queue.take();
+                if (chunk.terminal()) break;
+                processChunk(job, chunk.prompts(), chunk.startIndex());
+            }
+            if (job.status() != com.doproject.model.JobStatus.FAILED) job.finish();
+        } catch (OutOfMemoryError error) {
+            metrics.recordOutOfMemory();
+            job.fail();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            job.fail();
+        }
+    }
+
+    private void signalEnd(BlockingQueue<PromptChunk> queue) {
+        try {
+            queue.put(PromptChunk.end());
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void processChunk(Job job, List<String> prompts, int startIndex) {
+        for (int offset = 0; offset < prompts.size(); offset++) {
+            String prompt = prompts.get(offset);
+            try {
+                job.record(PromptResult.success(startIndex + offset, prompt,
+                    inferenceClient.evaluate(prompt, job.routeName())));
+            } catch (Exception exception) {
+                job.record(PromptResult.failure(startIndex + offset, prompt, exception));
+            }
+        }
+    }
+
+    private void validatePrompt(String prompt) {
+        if (prompt == null || prompt.isBlank()) {
             throw new InvalidBatchException("Prompts must be non-blank strings");
         }
     }
 
-    private void process(Job job, List<String> prompts) {
-        job.start();
-        try {
-            for (int start = 0; start < prompts.size(); start += properties.chunkSize()) {
-                int end = Math.min(start + properties.chunkSize(), prompts.size());
-                for (int index = start; index < end; index++) {
-                    String prompt = prompts.get(index);
-                    try {
-                        job.record(PromptResult.success(index, prompt, inferenceClient.evaluate(prompt)));
-                    } catch (Exception exception) {
-                        job.record(PromptResult.failure(index, prompt, exception));
-                    }
-                }
-            }
-            job.finish();
-        } catch (RuntimeException exception) {
-            job.fail();
-        }
+    @FunctionalInterface
+    private interface InputStreamSupplier {
+        InputStream open() throws IOException;
     }
 
     public static class InvalidBatchException extends RuntimeException {

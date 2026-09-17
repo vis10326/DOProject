@@ -1,5 +1,10 @@
 server:
   port: 8080
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics
 spring:
   servlet:
     multipart:
@@ -9,9 +14,21 @@ batch:
   max-prompts: 10000
   chunk-size: 25
   worker-threads: 4
+  ingestion-threads: 2
   queue-capacity: 32
   max-jobs: 1000
   input-directory: ./workspace-input
 inference:
   endpoint: ""
   timeout: 10s
+  max-retries: 3
+  initial-backoff: 100ms
+  max-backoff: 2s
+  default-route: cheap
+  routes:
+    - name: cheap
+      endpoint: ""
+      cost-per-request: 0.001
+    - name: premium
+      endpoint: ""
+      cost-per-request: 0.02

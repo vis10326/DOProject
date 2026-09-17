@@ -13,10 +13,10 @@ public class JobStore {
 
     public Optional<Job> find(String id) { return Optional.ofNullable(jobs.get(id)); }
 
-    public Job create(int promptCount, int maxJobs) {
+    public Job create(int promptCount, int maxJobs, int queueCapacity, String routeName) {
         if (jobs.size() >= maxJobs) throw new TooManyJobsException();
         String id = UUID.randomUUID().toString();
-        Job job = new Job(id, promptCount);
+        Job job = new Job(id, promptCount, queueCapacity, routeName);
         jobs.put(id, job);
         return job;
     }
