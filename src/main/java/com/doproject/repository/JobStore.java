@@ -52,14 +52,14 @@ public class JobStore {
     }
 
     public Job create(int promptCount, int maxJobs, String routeName) {
+        String id = UUID.randomUUID().toString();
+        Job job = new Job(id, promptCount, routeName);
         synchronized (this) {
             if (jobs.size() >= maxJobs) throw new TooManyJobsException();
-            String id = UUID.randomUUID().toString();
-            Job job = new Job(id, promptCount, routeName);
             jobs.put(id, job);
-            save(job);
-            return job;
         }
+        save(job);
+        return job;
     }
 
     public void save(Job job) {
