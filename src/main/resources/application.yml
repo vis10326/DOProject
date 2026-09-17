@@ -1,0 +1,17 @@
+server:
+  port: 8080
+spring:
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 5MB
+batch:
+  max-prompts: 10000
+  chunk-size: 25
+  worker-threads: 4
+  queue-capacity: 32
+  max-jobs: 1000
+  input-directory: ./workspace-input
+inference:
+  endpoint: ""
+  timeout: 10s
